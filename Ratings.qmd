@@ -1,0 +1,91 @@
+---
+title: "Data Visualization For Ratings Questions"
+format: html
+editor: visual
+---
+
+## Library
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+```
+
+## Load Data
+
+```{r}
+ratings <- read.delim(gzfile("Data_files/title.ratings.tsv.gz"), sep="\t")
+basics <- read.delim(gzfile("Data_files/title.basics.tsv.gz"), sep="\t")
+```
+
+Combine and deal with data.
+
+```{r}
+# Performing an inner join on the 'tconst' column
+combined_data <- merge(basics, ratings, by="tconst")
+
+genre_filter_data <- combined_data %>%
+  separate_rows(genres, sep = ",") %>%
+  filter(genres != "" & !is.na(genres) & genres != "\\N")
+
+```
+
+## Average Ratings By Genre
+
+```{r}
+average_ratings_by_genre <- genre_filter_data %>%
+  group_by(genres) %>%
+  summarise(averageRating = mean(averageRating, na.rm = TRUE), .groups = 'drop')
+
+save(average_ratings_by_genre, file = "Clean_Data_files/average_ratings_by_genre.RData")
+```
+
+
+Visualization:
+
+```{r}
+ggplot(average_ratings_by_genre, aes(x = reorder(genres, averageRating), y = averageRating)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  ylim(0, 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Genre", y = "Average Rating", title = "Average Ratings by Genre")
+```
+
+## Rating Trends Over Time
+
+```{r}
+startYear_filter_data <- combined_data %>%
+  filter(startYear != "" & !is.na(startYear) & startYear != "\\N")
+
+startYear_filter_data$startYear <- as.numeric(startYear_filter_data$startYear)
+```
+
+```{r}
+# Calculate average ratings by year and count the number of movies
+average_ratings_by_year <- startYear_filter_data %>%
+  group_by(startYear) %>%
+  summarise(
+    averageRating = mean(averageRating, na.rm = TRUE),
+    movieCount = n(), # Count the number of movies per year
+    .groups = 'drop'
+  ) %>%
+  filter(movieCount > 100) # Filter to include only years with greater than 100 movies
+
+# Save the modified dataset
+save(average_ratings_by_year, file = "Clean_Data_files/average_ratings_by_year.RData")
+```
+
+```{r}
+ggplot(average_ratings_by_year, aes(x = startYear, y = averageRating)) +
+  geom_line() + 
+  geom_point(aes(color = movieCount), size = 2.5) + 
+  scale_color_gradient(name = "Number of Movies", low = "lightgrey", high = "firebrick") + # Use a color gradient
+  scale_x_continuous(breaks = seq(min(average_ratings_by_year$startYear, na.rm = TRUE),
+                                  max(average_ratings_by_year$startYear, na.rm = TRUE), by = 8)) +
+  labs(x = "Start Year", y = "Average Rating", title = "Rating Trends Over Time") +
+  theme_minimal() +
+  theme(legend.position = "right", legend.key.size = unit(0.6, "cm"), 
+        legend.text = element_text(size = 8))
+```
+

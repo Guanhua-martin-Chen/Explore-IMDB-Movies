@@ -1,0 +1,199 @@
+---
+title: "Prediction"
+format: html
+editor: visual
+---
+
+# Data
+
+```{r}
+library(tidyr)
+library(dplyr)
+```
+
+
+```{r}
+crews = read.delim(gzfile("Data_files/title.crew.tsv.gz"), sep="\t")
+names = read.delim(gzfile("Data_files/name.basics.tsv.gz"), sep="\t")
+ratings <- read.delim(gzfile("Data_files/title.ratings.tsv.gz"), sep="\t")
+basics <- read.delim(gzfile("Data_files/title.basics.tsv.gz"), sep="\t")
+```
+
+```{r}
+library(data.table)
+
+# Convert data frames to data.tables
+setDT(crews)
+setDT(names)
+
+# Define a function to extract the first nconst and replace it with primaryName
+replace_first_nconst_with_name <- function(nconst_column, names_dt) {
+  # Split the nconst_column at commas and take the first element
+  first_nconsts <- sapply(strsplit(nconst_column, ","), `[`, 1)
+  
+  # Create a named vector of primaryNames with nconsts as names
+  names_vector <- setNames(names_dt$primaryName, names_dt$nconst)
+  
+  # Replace nconsts with primaryNames, keep \N if not found
+  replaced <- names_vector[first_nconsts]
+  replaced
+}
+
+# Replace the first nconst in directors and writers with the corresponding primaryName
+crews[, directors := replace_first_nconst_with_name(directors, names)]
+crews[, writers := replace_first_nconst_with_name(writers, names)]
+
+# Convert data.tables back to data.frames if needed
+setDF(crews)
+setDF(names)
+```
+
+
+```{r}
+combined_data <- merge(basics, ratings, by="tconst")
+
+final_data <- merge(combined_data, crews, by="tconst")
+
+final_data <- select(final_data, -endYear)
+
+```
+
+```{r}
+char_columns <- sapply(final_data, is.character)
+
+# Replace "\N" with NA only in character columns
+final_data <- final_data %>%
+  mutate(across(where(is.character), ~na_if(.x, "\\N")))
+
+# Next, convert empty strings to NA in character columns
+final_data <- final_data %>%
+  mutate(across(where(is.character), ~na_if(.x, "")))
+
+# Remove rows with any NA values
+final_data_clean <- na.omit(final_data)
+
+save(final_data_clean, file = "Clean_Data_files/final_data_clean.RData")
+```
+
+
+# Library XGBoost:
+##XGBoost Overview:
+  Stands for eXtreme Gradient Boosting.
+Advanced implementation focused on speed and performance.
+  Widely used and acclaimed for its efficiency and accuracy.
+  
+##Gradient Boosting Explained:
+  A technique that builds models as an ensemble of weak predictors.
+  Typically employs decision trees as the base learners.
+
+##gbtree Booster:
+  Utilizes tree-based models for prediction and learning.
+  Ideal for capturing complex non-linear relationships in data.
+  
+  
+# Library data.table
+## Efficient Data Handling
+  Handles large datasets more efficiently than base R's data.frame.
+  Provides fast reading and writing of data, significantly reducing data processing time.
+
+
+
+```{r}
+library(data.table)
+library(xgboost)
+
+# Convert the data.frame to a data.table
+setDT(final_data_clean)
+
+# Convert character columns to factors and then to numeric codes
+char_columns <- names(final_data_clean)[sapply(final_data_clean, is.character)]
+final_data_clean[, (char_columns) := lapply(.SD, factor), .SDcols = char_columns]
+final_data_clean[, (char_columns) := lapply(.SD, as.integer), .SDcols = char_columns]
+
+# Handle NA values in columns that are supposed to be numeric
+numeric_columns <- setdiff(names(final_data_clean), c("tconst", "averageRating"))
+final_data_clean[, (numeric_columns) := lapply(.SD, function(x) replace(x, is.na(x), -1)), .SDcols = numeric_columns]
+
+# Split data into training and testing sets
+set.seed(123)
+train_indices <- sample(seq_len(nrow(final_data_clean)), size = 0.8 * nrow(final_data_clean))
+train_data <- final_data_clean[train_indices]
+test_data <- final_data_clean[-train_indices]
+
+# Prepare the data for xgboost
+dtrain <- xgb.DMatrix(data = as.matrix(train_data[, ..numeric_columns]), 
+                      label = train_data$averageRating)
+dtest <- xgb.DMatrix(data = as.matrix(test_data[, ..numeric_columns]), 
+                     label = test_data$averageRating)
+
+# Set xgboost parameters()
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.05,
+  max_depth = 8,
+  subsample = 1,
+  min_child_weight = 1,
+  colsample_bytree = 0.7
+)
+
+# Train the model
+xgb_model <- xgb.train(params, dtrain, nrounds = 100)
+
+# Make predictions
+predictions <- predict(xgb_model, dtest)
+
+# Calculate performance metrics
+MAE <- mean(abs(predictions - test_data$averageRating))
+RMSE <- sqrt(mean((predictions - test_data$averageRating)^2))
+
+# Print performance metrics
+# MAE (Mean Absolute Error)
+# RMSE (Root Mean Square Error) 
+print(paste("MAE:", MAE))
+print(paste("RMSE:", RMSE))
+```
+
+
+1. Scatter Plot of Actual vs. Predicted Ratings: This will give you a visual sense of how your predicted values compare to the actual values.
+```{r}
+library(ggplot2)
+
+ggplot(test_data, aes(x = averageRating, y = predictions)) +
+  geom_point(alpha = 0.1, size = 1.5a) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Actual Ratings", y = "Predicted Ratings", title = "Actual vs Predicted Ratings") +
+  theme_minimal()
+```
+
+
+2. Residual Plot: Plotting the residuals (the differences between actual and predicted ratings) can help you identify patterns in the errors made by the model.
+
+```{r}
+test_data$residuals <- test_data$averageRating - predictions
+
+ggplot(test_data, aes(x = predictions, y = residuals)) +
+  geom_point(alpha = 0.05, size = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Predicted Ratings", y = "Residuals", title = "Residual Plot") +
+  theme_minimal()
+```
+
+
+3. Density Plot for Actual vs. Predicted Ratings
+This plot will show you how the distribution of predicted ratings compares to the actual ratings:
+
+```{r}
+plot_data <- data.frame(
+  Rating = c(test_data$averageRating, predictions),
+  Type = rep(c("Actual", "Predicted"), each = nrow(test_data))
+)
+
+# Plot
+ggplot(plot_data, aes(x = Rating, fill = Type)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values = c("blue", "yellow")) +
+  labs(title = "Density of Actual vs. Predicted Ratings", x = "Ratings", y = "Density") +
+  theme_minimal()
+```
+
